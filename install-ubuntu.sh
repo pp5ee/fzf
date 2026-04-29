@@ -447,28 +447,147 @@ verify_installation() {
     log_info "Successfully installed: $installed_version"
 }
 
+# Check if PREFIX/bin is in PATH for new shells
+check_path_persistence() {
+    log_info "Checking PATH configuration..."
+
+    # Standard system paths that are typically already in PATH
+    local standard_paths=("/usr/local/bin" "/usr/bin" "/bin")
+    local is_standard_path=false
+
+    for std_path in "${standard_paths[@]}"; do
+        if [[ "$PREFIX/bin" == "$std_path" ]]; then
+            is_standard_path=true
+            break
+        fi
+    done
+
+    if [[ "$is_standard_path" == "true" ]]; then
+        log_info "$PREFIX/bin is a standard system path and should be available in new shells."
+        return 0
+    fi
+
+    # Non-standard path - need to configure PATH
+    log_warn "$PREFIX/bin is not a standard system path."
+    log_info "Shell configuration will be updated to include $PREFIX/bin in PATH."
+
+    return 1
+}
+
+# Update shell configuration files to include PREFIX/bin in PATH
+update_shell_path() {
+    local shell_config_updated=false
+
+    # Update bash configuration
+    if [[ -f "$HOME/.bashrc" ]] || [[ -d "$HOME" ]]; then
+        local bashrc="$HOME/.bashrc"
+
+        # Check if already in PATH
+        if [[ -f "$bashrc" ]] && grep -q "$PREFIX/bin" "$bashrc" 2>/dev/null; then
+            log_info "PATH already configured in ~/.bashrc"
+        else
+            log_info "Adding $PREFIX/bin to PATH in ~/.bashrc..."
+            echo "" >> "$bashrc"
+            echo "# Add fzf to PATH" >> "$bashrc"
+            echo 'export PATH="'"$PREFIX/bin"':$PATH"' >> "$bashrc"
+            log_info "Updated ~/.bashrc"
+            shell_config_updated=true
+        fi
+    fi
+
+    # Update zsh configuration
+    if command -v zsh &>/dev/null; then
+        local zshrc="${ZDOTDIR:-$HOME}/.zshrc"
+
+        if [[ -f "$zshrc" ]] && grep -q "$PREFIX/bin" "$zshrc" 2>/dev/null; then
+            log_info "PATH already configured in ~/.zshrc"
+        else
+            log_info "Adding $PREFIX/bin to PATH in ~/.zshrc..."
+            echo "" >> "$zshrc"
+            echo "# Add fzf to PATH" >> "$zshrc"
+            echo 'export PATH="'"$PREFIX/bin"':$PATH"' >> "$zshrc"
+            log_info "Updated ~/.zshrc"
+            shell_config_updated=true
+        fi
+    fi
+
+    if [[ "$shell_config_updated" == "true" ]]; then
+        echo ""
+        log_warn "Shell configuration files have been updated."
+        log_warn "Please restart your terminal or run 'source ~/.bashrc' (or 'source ~/.zshrc')"
+        log_warn "to use fzf in the current session."
+    fi
+}
+
+# Simulate new shell session to verify fzf is available
+verify_new_shell_availability() {
+    log_info "Verifying fzf availability in new shell sessions..."
+
+    # Check if /usr/local/bin is in the default system PATH
+    # (by checking a minimal env)
+    local minimal_path
+    minimal_path=$(env -i PATH="/usr/local/bin:/usr/bin:/bin" which fzf 2>/dev/null || true)
+
+    if [[ -n "$minimal_path" ]]; then
+        log_info "fzf will be available in new shell sessions."
+        return 0
+    fi
+
+    # Check with user's current PATH
+    if command -v fzf &>/dev/null; then
+        log_info "fzf is available in current PATH."
+        return 0
+    fi
+
+    # fzf not in PATH - check if we need to update shell configs
+    if ! check_path_persistence; then
+        update_shell_path
+    fi
+}
+
 # Print post-installation instructions
 print_instructions() {
     echo ""
+    echo "====================================="
     log_info "Installation complete!"
+    echo "====================================="
     echo ""
     echo "fzf has been installed to: $PREFIX/bin/fzf"
     echo ""
 
-    # Check if in PATH
-    if command -v fzf &>/dev/null; then
-        log_info "fzf is available in your PATH."
+    # Verify fzf --version works
+    echo -n "Verifying 'fzf --version': "
+    if "$PREFIX/bin/fzf" --version &>/dev/null; then
+        local version
+        version=$("$PREFIX/bin/fzf" --version | head -1)
+        echo "$version"
     else
-        log_warn "fzf is not in your current PATH."
+        log_error "'fzf --version' failed - installation may have issues"
+    fi
+    echo ""
+
+    # Check PATH status
+    if command -v fzf &>/dev/null; then
+        log_info "fzf is available in your current PATH."
+        log_info "fzf will be available in new shell sessions."
+    elif [[ "$PREFIX/bin" == "/usr/local/bin" ]] || [[ "$PREFIX/bin" == "/usr/bin" ]]; then
+        log_info "fzf is installed to a standard system directory."
+        log_info "It will be available in new shell sessions after reloading your shell configuration."
         echo ""
-        echo "To use fzf, you may need to add $PREFIX/bin to your PATH:"
+        echo "To use fzf now, run: source ~/.bashrc  (or source ~/.zshrc)"
+    else
+        log_warn "fzf may not be in your PATH for new shell sessions."
+        echo ""
+        echo "To use fzf, add the following to your shell configuration:"
         echo "  export PATH=\"$PREFIX/bin:\$PATH\""
         echo ""
-        echo "Add this line to your ~/.bashrc or ~/.zshrc to make it permanent."
+        echo "Then reload your shell: source ~/.bashrc  (or source ~/.zshrc)"
     fi
 
     if [[ "$INSTALL_SHELL_INTEGRATION" == "true" ]]; then
         echo ""
+        echo "Shell Integration:"
+        echo "------------------"
         echo "To enable shell integration, add the following to your shell config:"
         echo ""
         echo "For bash (~/.bashrc):"
@@ -481,6 +600,11 @@ print_instructions() {
         echo ""
     fi
 
+    echo ""
+    echo "Quick Test:"
+    echo "-----------"
+    echo "  echo 'test' | fzf --filter='test'"
+    echo ""
     echo "For more information, see: https://github.com/junegunn/fzf"
 }
 
@@ -500,6 +624,7 @@ main() {
     install_binary
     install_shell_integration
     verify_installation
+    verify_new_shell_availability
     print_instructions
 
     log_info "Done!"
