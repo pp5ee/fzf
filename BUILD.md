@@ -1,73 +1,98 @@
-Building fzf
-============
+Building fzf (Rust)
+===================
 
 Build instructions
 ------------------
 
 ### Prerequisites
 
-- Go 1.23 or above
+- Rust 1.70 or above (install via [rustup](https://rustup.rs/))
+- Ubuntu/Debian: `sudo apt-get update && sudo apt-get install -y build-essential`
 
-### Using Makefile
+### Using Cargo
 
 ```sh
-# Build fzf binary for your platform in target
-make
+# Clone the repository
+git clone <repository-url>
+cd fzf
 
-# Build fzf binary and copy it to bin directory
-make install
+# Build fzf binary in release mode
+cargo build --release
 
-# Build fzf binaries and archives for all platforms using goreleaser
-make build
+# The binary will be available at:
+./target/release/fzf
 
-# Publish GitHub release
-make release
+# Run tests
+cargo test
+
+# Install locally (optional)
+cargo install --path .
 ```
 
-> [!WARNING]
-> Makefile uses git commands to determine the version and the revision
-> information for `fzf --version`. So if you're building fzf from an
-> environment where its git information is not available, you have to manually
-> set `$FZF_VERSION` and `$FZF_REVISION`.
->
-> e.g. `FZF_VERSION=0.24.0 FZF_REVISION=tarball make`
+### Quick Start on Ubuntu
 
-> [!TIP]
-> To build fzf with profiling options enabled, set `TAGS=pprof`
->
-> ```sh
-> TAGS=pprof make clean install
-> fzf --profile-cpu /tmp/cpu.pprof --profile-mem /tmp/mem.pprof \
->     --profile-block /tmp/block.pprof --profile-mutex /tmp/mutex.pprof
-> ```
+```sh
+# 1. Install Rust
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+source ~/.cargo/env
+
+# 2. Build
+make
+
+# 3. Test
+cargo test
+
+# 4. Install to bin/ directory
+make install
+```
 
 Running tests
 -------------
 
 ```sh
-# Run go unit tests
-make test
+# Run all Rust unit tests
+cargo test
 
-# Run integration tests (requires to be on tmux)
-make itest
+# Run tests with verbose output
+cargo test -- --nocapture
 
-# Run a single test case
-ruby test/runner.rb --name test_something
+# Run specific test
+cargo test test_pattern_fuzzy_match
+
+# Run tests in specific module
+cargo test algo::tests
+cargo test pattern::tests
+cargo test functions::tests
 ```
 
-Third-party libraries used
---------------------------
+Verification
+------------
 
-- [rivo/uniseg](https://github.com/rivo/uniseg)
-    - Licensed under [MIT](https://raw.githubusercontent.com/rivo/uniseg/master/LICENSE.txt)
-- [mattn/go-shellwords](https://github.com/mattn/go-shellwords)
-    - Licensed under [MIT](http://mattn.mit-license.org)
-- [mattn/go-isatty](https://github.com/mattn/go-isatty)
-    - Licensed under [MIT](http://mattn.mit-license.org)
-- [tcell](https://github.com/gdamore/tcell)
-    - Licensed under [Apache License 2.0](https://github.com/gdamore/tcell/blob/master/LICENSE)
-- [fastwalk](https://github.com/charlievieth/fastwalk)
-    - Licensed under [MIT](https://raw.githubusercontent.com/charlievieth/fastwalk/master/LICENSE)
+```sh
+# Verify build
+cargo build --release
+
+# Run all tests (should show 42 passed)
+cargo test 2>&1 | grep "test result"
+
+# Quick functional verification
+./target/release/fzf --version
+echo -e "apple\nbanana" | ./target/release/fzf -f "an"
+```
+
+Third-party libraries used (Rust)
+---------------------------------
+
+- [clap](https://github.com/clap-rs/clap) - Command line argument parser
+    - Licensed under [MIT](https://github.com/clap-rs/clap/blob/master/LICENSE-MIT)
+- [crossterm](https://github.com/crossterm-rs/crossterm) - Cross-platform terminal manipulation
+    - Licensed under [MIT](https://github.com/crossterm-rs/crossterm/blob/master/LICENSE)
+- [ratatui](https://github.com/ratatui/ratatui) - Terminal UI library
+    - Licensed under [MIT](https://github.com/ratatui/ratatui/blob/main/LICENSE)
+- [regex](https://github.com/rust-lang/regex) - Regular expressions
+    - Licensed under [MIT](https://github.com/rust-lang/regex/blob/master/LICENSE-MIT)
+- [rayon](https://github.com/rayon-rs/rayon) - Data parallelism
+    - Licensed under [MIT](https://github.com/rayon-rs/rayon/blob/master/LICENSE-MIT)
 
 License
 -------
