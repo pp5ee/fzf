@@ -1,8 +1,9 @@
 use crate::cache::ChunkCache;
 use crate::matcher::Matcher;
-use crate::options::{Algo, Case, Layout, Options, Scheme, BorderStyle};
+use crate::options::{Algo, Case, Layout, Options, Scheme, BorderStyle, InfoStyle};
 use crate::pattern::{Pattern, PatternOptions};
 use crate::reader::{Reader, EVT_READ_FIN, EVT_READ_NEW};
+use crate::terminal::Terminal;
 use crate::util::eventbox::{EventBox, EventType, EventValue};
 use crate::util::Executor;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -44,16 +45,13 @@ impl Core {
 
         // Handle shell integration output
         if self.options.bash {
-            print_shell_integration("bash")?;
-            return Ok(EXIT_OK);
+            return self.print_shell_integration("bash");
         }
         if self.options.zsh {
-            print_shell_integration("zsh")?;
-            return Ok(EXIT_OK);
+            return self.print_shell_integration("zsh");
         }
         if self.options.fish {
-            print_shell_integration("fish")?;
-            return Ok(EXIT_OK);
+            return self.print_shell_integration("fish");
         }
 
         // Handle version/help
@@ -62,7 +60,7 @@ impl Core {
             return Ok(EXIT_OK);
         }
         if self.options.help {
-            print_help();
+            self.print_help();
             return Ok(EXIT_OK);
         }
 
@@ -147,57 +145,73 @@ impl Core {
     }
 
     fn run_interactive_mode(&self) -> Result<i32> {
-        // For now, fall back to filter mode with empty filter
-        // Full terminal UI would require significant additional implementation
-        self.run_filter_mode("")
+        let mut terminal = Terminal::new(self.options.clone());
+        terminal.run()
+    }
+
+    fn print_shell_integration(&self, shell: &str) -> Result<i32> {
+        let (key_bindings, completion) = match shell {
+            "bash" => (
+                include_str!("../shell/key-bindings.bash"),
+                include_str!("../shell/completion.bash"),
+            ),
+            "zsh" => (
+                include_str!("../shell/key-bindings.zsh"),
+                include_str!("../shell/completion.zsh"),
+            ),
+            "fish" => (
+                include_str!("../shell/key-bindings.fish"),
+                include_str!("../shell/completion.fish"),
+            ),
+            _ => return Err(anyhow!("Unsupported shell: {}", shell)),
+        };
+
+        println!("### key-bindings.{} ###", shell);
+        println!("{}", key_bindings);
+        println!("### end: key-bindings.{} ###", shell);
+        println!();
+        println!("### completion.{} ###", shell);
+        println!("{}", completion);
+        println!("### end: completion.{} ###", shell);
+
+        Ok(EXIT_OK)
+    }
+
+    fn print_help(&self) {
+        println!("fzf - a command-line fuzzy finder");
+        println!();
+        println!("Usage: fzf [options]");
+        println!();
+        println!("  SEARCH");
+        println!("    -e, --exact              Enable exact-match");
+        println!("    -i, --ignore-case        Case-insensitive match");
+        println!("    +i, --no-ignore-case     Case-sensitive match");
+        println!("        --smart-case         Smart-case match (default)");
+        println!("    --literal                Do not normalize latin script letters");
+        println!("    -n, --nth=N[,..]         Comma-separated list of field index expressions");
+        println!("    --with-nth=N[,..]        Transform the presentation of each line");
+        println!("    --accept-nth=N[,..]      Define which fields to print on accept");
+        println!("    -d, --delimiter=STR      Field delimiter regex");
+        println!("    +s, --no-sort            Do not sort the result");
+        println!("    --tac                    Reverse the order of the input");
+        println!("    --disabled               Do not perform search");
+        println!();
+        println!("  INPUT/OUTPUT");
+        println!("    --read0                  Read input delimited by ASCII NUL characters");
+        println!("    --print0                 Print output delimited by ASCII NUL characters");
+        println!("    --ansi                   Enable processing of ANSI color codes");
+        println!();
+        println!("  DISPLAY");
+        println!("    --height=HEIGHT          Display fzf window with the given height");
+        println!("    --layout=LAYOUT          Choose layout: default|reverse|reverse-list");
+        println!("    --border[=STYLE]         Draw border around the finder");
+        println!("    --prompt=STR             Input prompt (default: '> ' )");
+        println!();
+        println!("  For more information, see: https://github.com/junegunn/fzf");
     }
 }
 
 pub fn run(options: Options) -> Result<i32> {
     let mut core = Core::new(options);
     core.run()
-}
-
-fn print_shell_integration(shell: &str) -> Result<()> {
-    let script = match shell {
-        "bash" => include_str!("../shell/key-bindings.bash"),
-        "zsh" => include_str!("../shell/key-bindings.zsh"),
-        "fish" => include_str!("../shell/key-bindings.fish"),
-        _ => return Err(anyhow!("Unsupported shell: {}", shell)),
-    };
-    println!("{}", script);
-    Ok(())
-}
-
-fn print_help() {
-    println!("fzf - a command-line fuzzy finder");
-    println!();
-    println!("Usage: fzf [options]");
-    println!();
-    println!("  SEARCH");
-    println!("    -e, --exact              Enable exact-match");
-    println!("    -i, --ignore-case        Case-insensitive match");
-    println!("    +i, --no-ignore-case     Case-sensitive match");
-    println!("        --smart-case         Smart-case match (default)");
-    println!("    --literal                Do not normalize latin script letters");
-    println!("    -n, --nth=N[,..]         Comma-separated list of field index expressions");
-    println!("    --with-nth=N[,..]        Transform the presentation of each line");
-    println!("    --accept-nth=N[,..]      Define which fields to print on accept");
-    println!("    -d, --delimiter=STR      Field delimiter regex");
-    println!("    +s, --no-sort            Do not sort the result");
-    println!("    --tac                    Reverse the order of the input");
-    println!("    --disabled               Do not perform search");
-    println!();
-    println!("  INPUT/OUTPUT");
-    println!("    --read0                  Read input delimited by ASCII NUL characters");
-    println!("    --print0                 Print output delimited by ASCII NUL characters");
-    println!("    --ansi                   Enable processing of ANSI color codes");
-    println!();
-    println!("  DISPLAY");
-    println!("    --height=HEIGHT          Display fzf window with the given height");
-    println!("    --layout=LAYOUT          Choose layout: default|reverse|reverse-list");
-    println!("    --border[=STYLE]         Draw border around the finder");
-    println!("    --prompt=STR             Input prompt (default: '> ' )");
-    println!();
-    println!("  For more information, see: https://github.com/junegunn/fzf");
 }
