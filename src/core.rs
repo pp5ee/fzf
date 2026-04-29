@@ -166,13 +166,18 @@ impl Core {
             _ => return Err(anyhow!("Unsupported shell: {}", shell)),
         };
 
-        println!("### key-bindings.{} ###", shell);
-        println!("{}", key_bindings);
-        println!("### end: key-bindings.{} ###", shell);
-        println!();
-        println!("### completion.{} ###", shell);
-        println!("{}", completion);
-        println!("### end: completion.{} ###", shell);
+        use std::io::{self, Write};
+        let stdout = io::stdout();
+        let mut handle = stdout.lock();
+
+        // Ignore broken pipe errors when writing to stdout
+        let _ = writeln!(handle, "### key-bindings.{} ###", shell);
+        let _ = writeln!(handle, "{}", key_bindings);
+        let _ = writeln!(handle, "### end: key-bindings.{} ###", shell);
+        let _ = writeln!(handle);
+        let _ = writeln!(handle, "### completion.{} ###", shell);
+        let _ = writeln!(handle, "{}", completion);
+        let _ = writeln!(handle, "### end: completion.{} ###", shell);
 
         Ok(EXIT_OK)
     }
