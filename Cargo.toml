@@ -33,6 +33,7 @@ bitflags = "2.6"
 dirs = "5.0"
 tempfile = "3.13"
 num_cpus = "1.16"
+rayon = "1.10"
 
 [dev-dependencies]
 tokio-test = "0.4"

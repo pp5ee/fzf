@@ -2,6 +2,9 @@ pub mod v1;
 pub mod v2;
 pub mod normalize;
 
+#[cfg(test)]
+mod tests;
+
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 pub const SCORE_MATCH: i32 = 16;

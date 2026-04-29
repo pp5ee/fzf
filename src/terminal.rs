@@ -1,5 +1,6 @@
 use crate::item::Item;
 use crate::options::{BorderStyle, Options};
+use crate::pattern::{Pattern, PatternOptions};
 use crate::reader::Reader;
 use crate::result::Result as FzfResult;
 use crate::util::chars::ChunkList;
@@ -15,13 +16,15 @@ use ratatui::{
     backend::{Backend, CrosstermBackend},
     layout::{Alignment, Constraint, Direction, Layout as RatatuiLayout, Rect},
     style::{Color, Modifier, Style},
-    widgets::{Block, Borders, List, ListItem, ListState, Paragraph},
+    widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap},
     Frame, Terminal as RatatuiTerminal,
 };
-use std::io;
+use std::io::{self, Write};
+use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use rayon::prelude::*;
 
 pub struct Terminal {
     options: Options,
@@ -37,6 +40,10 @@ pub struct Terminal {
     multi_selection: Vec<Arc<Item>>,
     last_search: Instant,
     search_debounce: Duration,
+    preview_visible: bool,
+    preview_output: String,
+    preview_scroll: usize,
+    use_parallel: bool,
 }
 
 impl Terminal {
@@ -50,6 +57,8 @@ impl Terminal {
             executor,
             options.read0,
         );
+
+        let preview_visible = options.preview.is_some();
 
         Self {
             options,
@@ -65,11 +74,14 @@ impl Terminal {
             multi_selection: Vec::new(),
             last_search: Instant::now(),
             search_debounce: Duration::from_millis(50),
+            preview_visible,
+            preview_output: String::new(),
+            preview_scroll: 0,
+            use_parallel: true,
         }
     }
 
     pub fn run(&mut self) -> Result<i32> {
-        // Setup terminal
         enable_raw_mode()?;
         let mut stdout = io::stdout();
         execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
@@ -77,20 +89,15 @@ impl Terminal {
         let backend = CrosstermBackend::new(stdout);
         let mut terminal = RatatuiTerminal::new(backend)?;
 
-        // Start reader thread
         let reader = self.reader.take().unwrap();
-
         std::thread::spawn(move || {
             let _ = reader.read_stdin();
         });
 
-        // Load initial items
         self.load_items();
 
-        // Main event loop
         let result = self.run_event_loop(&mut terminal);
 
-        // Cleanup
         disable_raw_mode()?;
         execute!(
             terminal.backend_mut(),
@@ -98,7 +105,6 @@ impl Terminal {
             DisableMouseCapture
         )?;
 
-        // Output selected items
         if result.is_ok() {
             self.output_selections()?;
         }
@@ -111,10 +117,8 @@ impl Terminal {
         let tick_rate = Duration::from_millis(100);
 
         while self.running.load(Ordering::Relaxed) {
-            // Draw UI
             terminal.draw(|f| self.draw(f))?;
 
-            // Handle events
             let timeout = tick_rate
                 .checked_sub(last_tick.elapsed())
                 .unwrap_or_else(|| Duration::from_secs(0));
@@ -129,10 +133,12 @@ impl Terminal {
                 }
             }
 
-            // Periodic updates
             if last_tick.elapsed() >= tick_rate {
                 self.load_items();
-                self.perform_search();
+                self.perform_parallel_search();
+                if self.preview_visible {
+                    self.update_preview();
+                }
                 last_tick = Instant::now();
             }
         }
@@ -157,7 +163,6 @@ impl Terminal {
         }
 
         if start_index < self.items.len() && self.query.is_empty() {
-            // Show all items when no query
             self.filtered_items = self.items.iter()
                 .map(|item| FzfResult::new(
                     Arc::clone(item),
@@ -166,7 +171,6 @@ impl Terminal {
                 ))
                 .collect();
 
-            // Sort by index
             if !self.options.tac {
                 self.filtered_items.sort_by_key(|r| r.item.index());
             } else {
@@ -175,7 +179,7 @@ impl Terminal {
         }
     }
 
-    fn perform_search(&mut self) {
+    fn perform_parallel_search(&mut self) {
         if self.query.is_empty() {
             return;
         }
@@ -184,7 +188,136 @@ impl Terminal {
             return;
         }
 
+        let pattern_opts = PatternOptions {
+            fuzzy: self.options.fuzzy,
+            fuzzy_algo: match self.options.algo {
+                crate::options::Algo::V1 => crate::algo::Algo::V1,
+                crate::options::Algo::V2 => crate::algo::Algo::V2,
+            },
+            extended: self.options.extended,
+            case_sensitive: self.options.case_sensitive == Some(true),
+            normalize: self.options.normalize,
+            forward: true,
+            with_pos: false,
+        };
+
+        let pattern = Arc::new(Pattern::new(&self.query, &pattern_opts));
+
+        if self.use_parallel && self.items.len() > 1000 {
+            self.filtered_items = self.perform_parallel_matching(pattern);
+        } else {
+            self.filtered_items = self.perform_sequential_matching(&pattern);
+        }
+
         self.last_search = Instant::now();
+
+        if let Some(selected) = self.selection.selected() {
+            if selected >= self.filtered_items.len() {
+                self.selection.select(if self.filtered_items.is_empty() {
+                    None
+                } else {
+                    Some(0)
+                });
+            }
+        } else if !self.filtered_items.is_empty() {
+            self.selection.select(Some(0));
+        }
+    }
+
+    fn perform_parallel_matching(&self, pattern: Arc<Pattern>) -> Vec<FzfResult> {
+        use rayon::prelude::*;
+
+        let items: Vec<_> = self.items.iter().map(|i| Arc::clone(i)).collect();
+
+        let mut results: Vec<FzfResult> = items
+            .par_iter()
+            .filter_map(|item| {
+                let text = item.text().to_vec();
+                pattern.match_text(&text).map(|m| {
+                    FzfResult::new(
+                        Arc::clone(item),
+                        crate::result::Rank::new(m.score, item.index() as u32, item.trim_length()),
+                        m,
+                    )
+                })
+            })
+            .collect();
+
+        if !self.options.no_sort {
+            results.par_sort_by(|a, b| {
+                b.rank.score.cmp(&a.rank.score)
+                    .then_with(|| a.rank.length.cmp(&b.rank.length))
+                    .then_with(|| b.rank.index.cmp(&a.rank.index))
+            });
+        }
+
+        results
+    }
+
+    fn perform_sequential_matching(&self, pattern: &Pattern) -> Vec<FzfResult> {
+        let mut results: Vec<FzfResult> = self.items
+            .iter()
+            .filter_map(|item| {
+                let text = item.text().to_vec();
+                pattern.match_text(&text).map(|m| {
+                    FzfResult::new(
+                        Arc::clone(item),
+                        crate::result::Rank::new(m.score, item.index() as u32, item.trim_length()),
+                        m,
+                    )
+                })
+            })
+            .collect();
+
+        if !self.options.no_sort {
+            results.sort_by(|a, b| {
+                b.rank.score.cmp(&a.rank.score)
+                    .then_with(|| a.rank.length.cmp(&b.rank.length))
+                    .then_with(|| b.rank.index.cmp(&a.rank.index))
+            });
+        }
+
+        results
+    }
+
+    fn update_preview(&mut self) {
+        if let Some(preview_cmd) = &self.options.preview {
+            if let Some(selected) = self.selection.selected() {
+                if let Some(result) = self.filtered_items.get(selected) {
+                    let item_text = result.item.as_string(true);
+                    let cmd = preview_cmd.replace("{}", &item_text);
+                    self.preview_output = self.execute_preview(&cmd);
+                }
+            }
+        }
+    }
+
+    fn execute_preview(&self, cmd: &str) -> String {
+        let output = if cfg!(target_os = "windows") {
+            Command::new("cmd")
+                .args(["/C", cmd])
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null())
+                .output()
+        } else {
+            Command::new("sh")
+                .arg("-c")
+                .arg(cmd)
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null())
+                .output()
+        };
+
+        match output {
+            Ok(output) => {
+                String::from_utf8_lossy(&output.stdout)
+                    .lines()
+                    .take(100)
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            }
+            Err(_) => String::from("[preview error]"),
+        }
     }
 
     fn handle_key_event(&mut self, code: KeyCode, modifiers: KeyModifiers) -> Result<()> {
@@ -316,11 +449,26 @@ impl Terminal {
                 print!("{}", delim);
             }
         }
+        let _ = std::io::stdout().flush();
         Ok(())
     }
 
     fn draw(&mut self, frame: &mut Frame) {
-        let chunks = self.layout_chunks(frame.area());
+        if self.preview_visible {
+            let chunks = RatatuiLayout::default()
+                .direction(Direction::Horizontal)
+                .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+                .split(frame.area());
+
+            self.draw_main_panel(frame, chunks[0]);
+            self.draw_preview_panel(frame, chunks[1]);
+        } else {
+            self.draw_main_panel(frame, frame.area());
+        }
+    }
+
+    fn draw_main_panel(&mut self, frame: &mut Frame, area: Rect) {
+        let chunks = self.layout_chunks(area);
 
         if let Some(header) = &self.options.header {
             self.draw_header(frame, chunks.header, header);
@@ -334,6 +482,25 @@ impl Terminal {
         }
 
         self.draw_info(frame, chunks.info);
+    }
+
+    fn draw_preview_panel(&self, frame: &mut Frame, area: Rect) {
+        let block = Block::default()
+            .title("Preview")
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Gray));
+
+        let preview_text = if self.preview_output.is_empty() {
+            "No preview available"
+        } else {
+            &self.preview_output
+        };
+
+        let paragraph = Paragraph::new(preview_text.to_string())
+            .block(block)
+            .wrap(Wrap { trim: true });
+
+        frame.render_widget(paragraph, area);
     }
 
     fn layout_chunks(&self, area: Rect) -> LayoutChunks {

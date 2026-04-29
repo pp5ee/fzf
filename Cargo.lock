@@ -478,6 +478,7 @@ dependencies = [
  "once_cell",
  "parking_lot",
  "ratatui",
+ "rayon",
  "regex",
  "serde",
  "serde_json",
