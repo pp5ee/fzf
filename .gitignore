@@ -1,0 +1,26 @@
+bin/fzf
+bin/fzf.exe
+dist
+target
+pkg
+.DS_Store
+doc/tags
+vendor
+gopath
+*.zwc
+fzf
+tmp
+*.patch
+.idea
+.humanize/
+.claude/
+.codex/
+.gemini/
+.cursor/
+.turbo/
+.next/
+
+
+# Added by cargo
+
+/target
