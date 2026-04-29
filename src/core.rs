@@ -35,10 +35,8 @@ impl Core {
     }
 
     pub fn run(&mut self) -> Result<i32> {
-        eprintln!("DEBUG: In core.run(), bash={}, version={}", self.options.bash, self.options.version);
         // Handle shell integration output first (before any initialization)
         if self.options.bash {
-            eprintln!("DEBUG: About to print_shell_integration");
             return self.print_shell_integration("bash");
         }
         if self.options.zsh {
@@ -214,8 +212,6 @@ impl Core {
 }
 
 pub fn run(options: Options) -> Result<i32> {
-    eprintln!("DEBUG: Creating Core");
     let mut core = Core::new(options);
-    eprintln!("DEBUG: Starting core.run()");
     core.run()
 }

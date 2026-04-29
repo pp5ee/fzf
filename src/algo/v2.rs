@@ -123,7 +123,7 @@ pub fn fuzzy_match(
         }
     }
 
-    if best_score == i32::MIN {
+    if best_score == i32::MIN || best_score == i32::MIN / 2 {
         return None;
     }
 

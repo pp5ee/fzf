@@ -215,6 +215,10 @@ impl Default for Options {
 pub fn parse_options(args: &[String]) -> anyhow::Result<Options> {
     let mut opts = Options::default();
 
+    // Prepend "fzf" to args since clap expects the program name as first arg
+    let mut full_args = vec!["fzf".to_string()];
+    full_args.extend_from_slice(args);
+
     let cmd = Command::new("fzf")
         .about("A command-line fuzzy finder")
         .disable_version_flag(true)
@@ -468,18 +472,7 @@ pub fn parse_options(args: &[String]) -> anyhow::Result<Options> {
             .action(ArgAction::SetTrue)
             .help("Output fish integration scripts"));
 
-    eprintln!("DEBUG: Parsing args: {:?}", args);
-    let matches = match cmd.try_get_matches_from(args) {
-        Ok(m) => m,
-        Err(e) => {
-            eprintln!("DEBUG: Clap error: {:?}", e);
-            return Err(e.into());
-        }
-    };
-
-    eprintln!("DEBUG: Parsed args, got matches. bash flag = {}, version flag = {}",
-        matches.get_flag("bash"), matches.get_flag("version-flag"));
-    eprintln!("DEBUG: args present: {:?}", matches.args_present());
+    let matches = cmd.try_get_matches_from(&full_args)?;
 
     // Parse boolean flags
     opts.filter = matches.get_one::<String>("filter").cloned();
