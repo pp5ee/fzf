@@ -217,6 +217,8 @@ pub fn parse_options(args: &[String]) -> anyhow::Result<Options> {
 
     let cmd = Command::new("fzf")
         .about("A command-line fuzzy finder")
+        .disable_version_flag(true)
+        .disable_help_flag(true)
         .arg(Arg::new("filter")
             .long("filter")
             .short('f')
@@ -327,6 +329,7 @@ pub fn parse_options(args: &[String]) -> anyhow::Result<Options> {
         .arg(Arg::new("border")
             .long("border")
             .value_name("STYLE")
+            .num_args(0..=1)
             .action(ArgAction::Set)
             .help("Draw border around the finder"))
         .arg(Arg::new("prompt")
@@ -465,7 +468,18 @@ pub fn parse_options(args: &[String]) -> anyhow::Result<Options> {
             .action(ArgAction::SetTrue)
             .help("Output fish integration scripts"));
 
-    let matches = cmd.try_get_matches_from(args)?;
+    eprintln!("DEBUG: Parsing args: {:?}", args);
+    let matches = match cmd.try_get_matches_from(args) {
+        Ok(m) => m,
+        Err(e) => {
+            eprintln!("DEBUG: Clap error: {:?}", e);
+            return Err(e.into());
+        }
+    };
+
+    eprintln!("DEBUG: Parsed args, got matches. bash flag = {}, version flag = {}",
+        matches.get_flag("bash"), matches.get_flag("version-flag"));
+    eprintln!("DEBUG: args present: {:?}", matches.args_present());
 
     // Parse boolean flags
     opts.filter = matches.get_one::<String>("filter").cloned();
@@ -520,6 +534,7 @@ pub fn parse_options(args: &[String]) -> anyhow::Result<Options> {
 
     if let Some(border) = matches.get_one::<String>("border") {
         opts.border = match border.as_str() {
+            "" => BorderStyle::Rounded,  // --border with no value
             "none" => BorderStyle::None,
             "sharp" => BorderStyle::Sharp,
             "bold" => BorderStyle::Bold,
@@ -534,8 +549,6 @@ pub fn parse_options(args: &[String]) -> anyhow::Result<Options> {
             "right" => BorderStyle::Right,
             _ => BorderStyle::Rounded,
         };
-    } else if matches.get_flag("border") {
-        opts.border = BorderStyle::Rounded;
     }
 
     if let Some(prompt) = matches.get_one::<String>("prompt") {

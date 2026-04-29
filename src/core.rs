@@ -35,16 +35,10 @@ impl Core {
     }
 
     pub fn run(&mut self) -> Result<i32> {
-        // Initialize algo scheme
-        let scheme_str = match self.options.scheme {
-            Scheme::Path => "path",
-            Scheme::History => "history",
-            _ => "default",
-        };
-        crate::algo::Scheme::init(scheme_str);
-
-        // Handle shell integration output
+        eprintln!("DEBUG: In core.run(), bash={}, version={}", self.options.bash, self.options.version);
+        // Handle shell integration output first (before any initialization)
         if self.options.bash {
+            eprintln!("DEBUG: About to print_shell_integration");
             return self.print_shell_integration("bash");
         }
         if self.options.zsh {
@@ -53,6 +47,14 @@ impl Core {
         if self.options.fish {
             return self.print_shell_integration("fish");
         }
+
+        // Initialize algo scheme
+        let scheme_str = match self.options.scheme {
+            Scheme::Path => "path",
+            Scheme::History => "history",
+            _ => "default",
+        };
+        crate::algo::Scheme::init(scheme_str);
 
         // Handle version/help
         if self.options.version {
@@ -212,6 +214,8 @@ impl Core {
 }
 
 pub fn run(options: Options) -> Result<i32> {
+    eprintln!("DEBUG: Creating Core");
     let mut core = Core::new(options);
+    eprintln!("DEBUG: Starting core.run()");
     core.run()
 }

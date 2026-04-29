@@ -42,7 +42,7 @@ impl Reader {
 
     pub fn read_stdin(&self) -> io::Result<()> {
         let stdin = io::stdin();
-        let mut stdin = stdin.lock();
+        let mut stdin_handle = stdin.lock();
 
         let delimiter = if self.delim_null { b'\0' } else { b'\n' };
         let mut buffer = Vec::new();
@@ -51,9 +51,9 @@ impl Reader {
         loop {
             buffer.clear();
             let bytes_read = if self.delim_null {
-                read_until(&mut stdin, delimiter, &mut buffer)?
+                read_until(&mut stdin_handle, delimiter, &mut buffer)?
             } else {
-                stdin.read_until(delimiter, &mut buffer)?
+                stdin_handle.read_until(delimiter, &mut buffer)?
             };
 
             if bytes_read == 0 {

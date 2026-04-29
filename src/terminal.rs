@@ -1,3 +1,4 @@
+use crate::functions::{Action, ActionHandler, execute_action};
 use crate::item::Item;
 use crate::options::{BorderStyle, Layout, Options};
 use crate::pattern::{Pattern, PatternOptions};
@@ -15,10 +16,9 @@ use crossterm::{
 };
 use ratatui::{
     backend::{Backend, CrosstermBackend},
-    layout::{Alignment, Constraint, Direction, Layout as RatatuiLayout, Margin, Rect, Position},
+    layout::{Alignment, Constraint, Direction, Layout as RatatuiLayout, Margin, Rect},
     style::{Color, Modifier, Style},
-    widgets::{Block, Borders, Clear as ClearWidget, List, ListItem, ListState, Paragraph, Wrap, BorderType},
-    text::{Line, Span, Text},
+    widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap, BorderType},
     Frame, Terminal as RatatuiTerminal,
 };
 use std::io::{self, Write};
@@ -50,6 +50,7 @@ pub struct Terminal {
     terminal_size: (u16, u16),
     scroll_offset: usize,
     info_style: InfoStyle,
+    action_handler: ActionHandler,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -100,6 +101,13 @@ impl Terminal {
         let query = options.query.clone().unwrap_or_default();
         let cursor_pos = options.query.as_ref().map(|q| q.len()).unwrap_or(0);
 
+        // Initialize action handler with custom bindings
+        let mut action_handler = ActionHandler::new();
+        for bind_str in &options.bind {
+            let bindings = ActionHandler::parse_bindings(bind_str);
+            action_handler.apply_bindings(&bindings);
+        }
+
         Self {
             options,
             query,
@@ -122,6 +130,7 @@ impl Terminal {
             terminal_size: (0, 0),
             scroll_offset: 0,
             info_style,
+            action_handler,
         }
     }
 
@@ -218,7 +227,6 @@ impl Terminal {
                             }
                         }
                         CrosstermEvent::Resize(_cols, _rows) => {
-                            // Handle terminal resize
                             if let Ok(size) = terminal.size() {
                                 self.terminal_size = (size.width, size.height);
                             }
@@ -414,46 +422,26 @@ impl Terminal {
     }
 
     fn handle_key_event(&mut self, code: KeyCode, modifiers: KeyModifiers) -> Result<()> {
+        // Convert key event to action using ActionHandler
+        let key_str = Self::key_to_string(code, modifiers);
+
+        if let Some(actions) = self.action_handler.get_actions(&key_str) {
+            for action in actions.clone() {
+                self.execute_action(&action)?;
+            }
+            return Ok(());
+        }
+
+        // Default handling for keys without bindings
         match code {
             KeyCode::Char(c) => {
                 if modifiers.contains(KeyModifiers::CONTROL) {
+                    // Ctrl+keys are handled by action handler, but catch unbound ones
                     match c {
                         'c' => self.running.store(false, Ordering::Relaxed),
-                        'u' => {
-                            self.query.clear();
-                            self.cursor_pos = 0;
-                        }
-                        'w' => self.delete_word(),
-                        'a' => self.cursor_pos = 0,
-                        'e' => self.cursor_pos = self.query.len(),
-                        'n' => self.move_cursor(1),
-                        'p' => self.move_cursor(-1),
-                        'f' => self.move_cursor(1),
-                        'b' => self.move_cursor(-1),
-                        'd' => {
-                            if self.cursor_pos < self.query.len() {
-                                self.query.remove(self.cursor_pos);
-                            }
-                        }
-                        'k' => {
-                            self.query.truncate(self.cursor_pos);
-                        }
-                        'g' => self.running.store(false, Ordering::Relaxed),
-                        'j' => self.move_selection(1),
-                        'h' => self.move_selection(-1),
-                        'l' => self.move_selection(1),
-                        'm' => self.accept_selection()?,
-                        '/' => self.toggle_preview(),
                         _ => {}
                     }
-                } else if modifiers.contains(KeyModifiers::ALT) {
-                    match c {
-                        'b' => self.move_word(-1),
-                        'f' => self.move_word(1),
-                        'd' => self.delete_word_forward(),
-                        _ => {}
-                    }
-                } else {
+                } else if !modifiers.contains(KeyModifiers::ALT) {
                     self.query.insert(self.cursor_pos, c);
                     self.cursor_pos += 1;
                     self.last_search = Instant::now() - self.search_debounce;
@@ -466,64 +454,141 @@ impl Terminal {
                     self.last_search = Instant::now() - self.search_debounce;
                 }
             }
-            KeyCode::Delete => {
+            KeyCode::Enter => {
+                self.accept_selection()?;
+            }
+            _ => {}
+        }
+
+        Ok(())
+    }
+
+    fn key_to_string(code: KeyCode, modifiers: KeyModifiers) -> String {
+        let mut parts = Vec::new();
+
+        if modifiers.contains(KeyModifiers::CONTROL) {
+            parts.push("ctrl");
+        }
+        if modifiers.contains(KeyModifiers::ALT) {
+            parts.push("alt");
+        }
+        if modifiers.contains(KeyModifiers::SHIFT) {
+            parts.push("shift");
+        }
+
+        let key = match code {
+            KeyCode::Char(c) => c.to_string(),
+            KeyCode::Enter => "enter".to_string(),
+            KeyCode::Tab => "tab".to_string(),
+            KeyCode::Backspace => "backspace".to_string(),
+            KeyCode::Esc => "esc".to_string(),
+            KeyCode::Left => "left".to_string(),
+            KeyCode::Right => "right".to_string(),
+            KeyCode::Up => "up".to_string(),
+            KeyCode::Down => "down".to_string(),
+            KeyCode::Home => "home".to_string(),
+            KeyCode::End => "end".to_string(),
+            KeyCode::PageUp => "page-up".to_string(),
+            KeyCode::PageDown => "page-down".to_string(),
+            KeyCode::Delete => "delete".to_string(),
+            KeyCode::Insert => "insert".to_string(),
+            KeyCode::F(n) => format!("f{}", n),
+            _ => return String::new(),
+        };
+
+        parts.push(&key);
+        parts.join("-")
+    }
+
+    fn execute_action(&mut self, action: &Action) -> Result<()> {
+        match action {
+            // Navigation
+            Action::CursorDown => self.move_selection(1),
+            Action::CursorUp => self.move_selection(-1),
+            Action::CursorLeft => self.move_cursor(-1),
+            Action::CursorRight => self.move_cursor(1),
+            Action::CursorHome => self.cursor_pos = 0,
+            Action::CursorEnd => self.cursor_pos = self.query.len(),
+            Action::CursorPageUp => self.move_selection(-10),
+            Action::CursorPageDown => self.move_selection(10),
+            Action::HalfPageUp => self.move_selection(-5),
+            Action::HalfPageDown => self.move_selection(5),
+
+            // Selection
+            Action::Accept => return self.accept_selection(),
+            Action::AcceptNonEmpty => {
+                if !self.filtered_items.is_empty() {
+                    return self.accept_selection();
+                }
+            }
+            Action::Abort => self.running.store(false, Ordering::Relaxed),
+            Action::Cancel => self.running.store(false, Ordering::Relaxed),
+            Action::Toggle => self.toggle_selection(),
+            Action::ToggleAll => self.toggle_all(),
+            Action::SelectAll => self.select_all(),
+            Action::DeselectAll => self.deselect_all(),
+
+            // Editing
+            Action::DeleteChar => {
                 if self.cursor_pos < self.query.len() {
                     self.query.remove(self.cursor_pos);
                     self.last_search = Instant::now() - self.search_debounce;
                 }
             }
-            KeyCode::Left => {
-                if modifiers.contains(KeyModifiers::CONTROL) {
-                    self.move_word(-1);
-                } else {
-                    self.move_cursor(-1);
+            Action::DeleteWord => self.delete_word_forward(),
+            Action::DeleteWordBack => self.delete_word(),
+            Action::ClearQuery => {
+                self.query.clear();
+                self.cursor_pos = 0;
+                self.last_search = Instant::now() - self.search_debounce;
+            }
+            Action::ClearSelection => self.multi_selection.clear(),
+            Action::BackwardWord => self.move_word(-1),
+            Action::ForwardWord => self.move_word(1),
+            Action::BeginningOfLine => self.cursor_pos = 0,
+            Action::EndOfLine => self.cursor_pos = self.query.len(),
+
+            // Preview
+            Action::TogglePreview => {
+                if self.options.preview.is_some() {
+                    self.preview_visible = !self.preview_visible;
                 }
             }
-            KeyCode::Right => {
-                if modifiers.contains(KeyModifiers::CONTROL) {
-                    self.move_word(1);
-                } else {
-                    self.move_cursor(1);
-                }
+            Action::PreviewUp => self.scroll_preview(-1),
+            Action::PreviewDown => self.scroll_preview(1),
+            Action::PreviewPageUp => self.scroll_preview(-10),
+            Action::PreviewPageDown => self.scroll_preview(10),
+
+            // Modes
+            Action::ToggleSort => self.options.no_sort = !self.options.no_sort,
+
+            // Execution - these are handled separately
+            Action::Execute(cmd) => {
+                let _ = execute_command(cmd);
             }
-            KeyCode::Up => {
-                if modifiers.contains(KeyModifiers::CONTROL) {
-                    self.scroll_preview(-1);
-                } else {
-                    self.move_selection(-1);
-                }
+            Action::ExecuteSilent(cmd) => {
+                let _ = execute_command_silent(cmd);
             }
-            KeyCode::Down => {
-                if modifiers.contains(KeyModifiers::CONTROL) {
-                    self.scroll_preview(1);
-                } else {
-                    self.move_selection(1);
-                }
+
+            // Query manipulation
+            Action::ChangeQuery(q) => {
+                self.query = q.clone();
+                self.cursor_pos = self.query.len();
+                self.last_search = Instant::now() - self.search_debounce;
             }
-            KeyCode::Home => self.cursor_pos = 0,
-            KeyCode::End => self.cursor_pos = self.query.len(),
-            KeyCode::PageUp => self.move_selection(-10),
-            KeyCode::PageDown => self.move_selection(10),
-            KeyCode::Enter => self.accept_selection()?,
-            KeyCode::Tab => {
-                if modifiers.contains(KeyModifiers::SHIFT) {
-                    self.move_selection(-1);
-                } else {
-                    if self.options.multi.is_some() {
-                        self.toggle_selection();
-                    } else {
-                        self.move_selection(1);
+            Action::ReplaceQuery => {
+                if let Some(selected) = self.selection.selected() {
+                    if let Some(result) = self.filtered_items.get(selected) {
+                        self.query = result.item.as_string(true);
+                        self.cursor_pos = self.query.len();
+                        self.last_search = Instant::now() - self.search_debounce;
                     }
                 }
             }
-            KeyCode::Esc => self.running.store(false, Ordering::Relaxed),
-            KeyCode::F(n) => {
-                if n == 1 {
-                    self.running.store(false, Ordering::Relaxed);
-                }
-            }
+
             _ => {}
         }
+
         Ok(())
     }
 
@@ -577,6 +642,9 @@ impl Terminal {
     }
 
     fn move_selection(&mut self, delta: i32) {
+        if self.filtered_items.is_empty() {
+            return;
+        }
         let current = self.selection.selected().unwrap_or(0);
         let new_pos = current as i32 + delta;
         let max = self.filtered_items.len().saturating_sub(1) as i32;
@@ -596,12 +664,6 @@ impl Terminal {
         }
     }
 
-    fn toggle_preview(&mut self) {
-        if self.options.preview.is_some() {
-            self.preview_visible = !self.preview_visible;
-        }
-    }
-
     fn toggle_selection(&mut self) {
         if let Some(selected) = self.selection.selected() {
             if let Some(result) = self.filtered_items.get(selected) {
@@ -616,6 +678,30 @@ impl Terminal {
                 }
             }
         }
+    }
+
+    fn toggle_all(&mut self) {
+        for result in &self.filtered_items {
+            let item = Arc::clone(&result.item);
+            if let Some(pos) = self.multi_selection.iter().position(|i| i.index() == item.index()) {
+                self.multi_selection.remove(pos);
+            } else if self.multi_selection.len() < self.options.multi.unwrap_or(usize::MAX) {
+                self.multi_selection.push(item);
+            }
+        }
+    }
+
+    fn select_all(&mut self) {
+        self.multi_selection.clear();
+        for result in &self.filtered_items {
+            if self.multi_selection.len() < self.options.multi.unwrap_or(usize::MAX) {
+                self.multi_selection.push(Arc::clone(&result.item));
+            }
+        }
+    }
+
+    fn deselect_all(&mut self) {
+        self.multi_selection.clear();
     }
 
     fn accept_selection(&mut self) -> Result<()> {
@@ -719,6 +805,29 @@ impl Terminal {
         }
     }
 
+    fn draw_preview_panel(&self, frame: &mut Frame, area: Rect) {
+        let block = Block::default()
+            .title("Preview")
+            .borders(Borders::ALL)
+            .border_type(self.get_border_style())
+            .border_style(Style::default().fg(Color::Gray));
+
+        let preview_text = if self.preview_output.is_empty() {
+            "No preview available"
+        } else {
+            &self.preview_output
+        };
+
+        let lines: Vec<&str> = preview_text.lines().skip(self.preview_scroll).collect();
+        let display_text = lines.join("\n");
+
+        let paragraph = Paragraph::new(display_text)
+            .block(block)
+            .wrap(Wrap { trim: true });
+
+        frame.render_widget(paragraph, area);
+    }
+
     fn get_border_type(&self) -> Borders {
         match self.options.border {
             BorderStyle::None => Borders::NONE,
@@ -743,62 +852,17 @@ impl Terminal {
         }
     }
 
-    fn draw_preview_panel(&self, frame: &mut Frame, area: Rect) {
-        let block = Block::default()
-            .title("Preview")
-            .borders(Borders::ALL)
-            .border_type(self.get_border_style())
-            .border_style(Style::default().fg(Color::Gray));
-
-        let preview_text = if self.preview_output.is_empty() {
-            "No preview available"
-        } else {
-            &self.preview_output
-        };
-
-        let lines: Vec<&str> = preview_text.lines().skip(self.preview_scroll).collect();
-        let display_text = lines.join("\n");
-
-        let paragraph = Paragraph::new(display_text)
-            .block(block)
-            .wrap(Wrap { trim: true });
-
-        frame.render_widget(paragraph, area);
-    }
-
     fn layout_chunks(&self, area: Rect) -> LayoutChunks {
         let has_header = self.options.header.is_some();
         let has_footer = self.options.footer.is_some();
 
-        let constraints = match self.options.layout {
-            Layout::Reverse => {
-                vec![
-                    if has_footer { Constraint::Length(1) } else { Constraint::Length(0) },
-                    Constraint::Length(1),
-                    Constraint::Min(1),
-                    Constraint::Length(1),
-                    if has_header { Constraint::Length(1) } else { Constraint::Length(0) },
-                ]
-            }
-            Layout::ReverseList => {
-                vec![
-                    if has_header { Constraint::Length(1) } else { Constraint::Length(0) },
-                    Constraint::Length(1),
-                    Constraint::Min(1),
-                    Constraint::Length(1),
-                    if has_footer { Constraint::Length(1) } else { Constraint::Length(0) },
-                ]
-            }
-            _ => {
-                vec![
-                    if has_header { Constraint::Length(1) } else { Constraint::Length(0) },
-                    Constraint::Length(1),
-                    Constraint::Min(1),
-                    Constraint::Length(1),
-                    if has_footer { Constraint::Length(1) } else { Constraint::Length(0) },
-                ]
-            }
-        };
+        let constraints = vec![
+            if has_header { Constraint::Length(1) } else { Constraint::Length(0) },
+            Constraint::Length(1),
+            Constraint::Min(1),
+            Constraint::Length(1),
+            if has_footer { Constraint::Length(1) } else { Constraint::Length(0) },
+        ];
 
         let main_chunks = RatatuiLayout::default()
             .direction(Direction::Vertical)
@@ -924,4 +988,52 @@ struct LayoutChunks {
     list: Rect,
     info: Rect,
     footer: Rect,
+}
+
+fn execute_command(cmd: &str) -> Result<(), String> {
+    use std::process::Command;
+
+    let status = if cfg!(target_os = "windows") {
+        Command::new("cmd")
+            .args(["/C", cmd])
+            .status()
+            .map_err(|e| e.to_string())?
+    } else {
+        Command::new("sh")
+            .arg("-c")
+            .arg(cmd)
+            .status()
+            .map_err(|e| e.to_string())?
+    };
+
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("Command exited with status: {}", status))
+    }
+}
+
+fn execute_command_silent(cmd: &str) -> Result<(), String> {
+    use std::process::{Command, Stdio};
+    use std::thread;
+
+    let cmd = cmd.to_string();
+    thread::spawn(move || {
+        let _ = if cfg!(target_os = "windows") {
+            Command::new("cmd")
+                .args(["/C", &cmd])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+        } else {
+            Command::new("sh")
+                .arg("-c")
+                .arg(&cmd)
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+        };
+    });
+
+    Ok(())
 }
