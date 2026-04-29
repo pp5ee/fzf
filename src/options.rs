@@ -522,8 +522,8 @@ pub fn parse_options(args: &[String]) -> anyhow::Result<Options> {
     opts.normalize = !opts.literal;
 
     opts.nth = matches.get_one::<String>("nth").cloned();
-    opts.with_nth = matches.get_one::<String>("with_nth").cloned();
-    opts.accept_nth = matches.get_one::<String>("accept_nth").cloned();
+    opts.with_nth = matches.get_one::<String>("with-nth").cloned();
+    opts.accept_nth = matches.get_one::<String>("accept-nth").cloned();
     opts.delimiter = matches.get_one::<String>("delimiter").cloned();
 
     opts.no_sort = matches.get_flag("no-sort");
@@ -579,7 +579,7 @@ pub fn parse_options(args: &[String]) -> anyhow::Result<Options> {
     }
 
     opts.header = matches.get_one::<String>("header").cloned();
-    opts.header_lines = matches.get_one::<String>("header_lines")
+    opts.header_lines = matches.get_one::<String>("header-lines")
         .and_then(|s| s.parse().ok())
         .unwrap_or(0);
     opts.footer = matches.get_one::<String>("footer").cloned();
@@ -675,3 +675,4 @@ pub fn parse_options(args: &[String]) -> anyhow::Result<Options> {
 
     Ok(opts)
 }
+
