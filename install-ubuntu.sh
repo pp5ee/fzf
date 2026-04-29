@@ -2,8 +2,8 @@
 #
 # install-ubuntu.sh - Build and install fzf from source on Ubuntu
 #
-# This script builds fzf from the Rust source code and installs it system-wide,
-# providing an experience similar to `apt install fzf`.
+# This script downloads fzf source code from GitHub, compiles the release binary,
+# and installs it system-wide, providing an experience similar to `apt install fzf`.
 #
 
 set -euo pipefail
@@ -12,7 +12,11 @@ set -euo pipefail
 readonly FZF_VERSION="${FZF_VERSION:-0.72.0}"
 readonly PREFIX="${PREFIX:-/usr/local}"
 readonly INSTALL_SHELL_INTEGRATION="${INSTALL_SHELL_INTEGRATION:-true}"
-readonly SOURCE_DIR="${SOURCE_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}"
+readonly FZF_REPO="${FZF_REPO:-https://github.com/junegunn/fzf}"
+
+# Build directory (temp or local)
+BUILD_DIR=""
+SOURCE_DIR=""
 
 # Colors for output
 readonly RED='\033[0;31m'
@@ -31,6 +35,12 @@ cleanup() {
     if [[ $exit_code -ne 0 ]]; then
         log_error "Installation failed with exit code $exit_code"
     fi
+
+    # Clean up temp directory if we created one
+    if [[ -n "${BUILD_DIR:-}" && -d "$BUILD_DIR" && "$BUILD_DIR" != "$SOURCE_DIR" ]]; then
+        rm -rf "$BUILD_DIR"
+    fi
+
     exit $exit_code
 }
 trap cleanup EXIT
@@ -140,31 +150,114 @@ install_rust() {
     log_info "Rust installed successfully."
 }
 
-# Verify source code is available
-check_source_code() {
-    log_info "Checking for fzf source code..."
+# Fetch fzf source code from GitHub
+fetch_source_code() {
+    log_info "Fetching fzf source code (version: $FZF_VERSION)..."
 
-    if [[ -f "$SOURCE_DIR/Cargo.toml" ]]; then
-        log_info "Found local source code at: $SOURCE_DIR"
+    # Check for local source first (if running from repo)
+    local script_dir
+    script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+
+    if [[ -f "$script_dir/Cargo.toml" || -f "$script_dir/go.mod" ]]; then
+        log_info "Found local source code at: $script_dir"
+        SOURCE_DIR="$script_dir"
+        BUILD_DIR="$script_dir"
         return 0
     fi
 
-    log_error "fzf source code not found at $SOURCE_DIR"
-    log_error "Please run this script from the fzf repository root directory."
-    exit 1
+    # Need to download source from GitHub
+    BUILD_DIR=$(mktemp -d /tmp/fzf-build.XXXXXX)
+    log_info "Using temporary build directory: $BUILD_DIR"
+
+    local download_url="${FZF_REPO}/archive/refs/tags/v${FZF_VERSION}.tar.gz"
+    local tarball="$BUILD_DIR/fzf-${FZF_VERSION}.tar.gz"
+
+    log_info "Downloading source from: $download_url"
+
+    # Download with curl or wget, with proper error handling
+    local download_success=false
+
+    if command -v curl &>/dev/null; then
+        if curl -fL --connect-timeout 30 --max-time 300 -o "$tarball" "$download_url" 2>&1; then
+            download_success=true
+        else
+            log_error "curl download failed"
+        fi
+    elif command -v wget &>/dev/null; then
+        if wget --timeout=30 --tries=3 -O "$tarball" "$download_url" 2>&1; then
+            download_success=true
+        else
+            log_error "wget download failed"
+        fi
+    else
+        log_error "Neither curl nor wget is available. Cannot download source code."
+        exit 1
+    fi
+
+    if [[ "$download_success" != "true" ]]; then
+        log_error "Failed to download fzf source from: $download_url"
+        log_error "Please check:"
+        log_error "  1. Your internet connection is working"
+        log_error "  2. The version $FZF_VERSION exists (see https://github.com/junegunn/fzf/releases)"
+        log_error "  3. You may try a different version with: FZF_VERSION=x.x.x $0"
+        exit 1
+    fi
+
+    # Verify tarball is valid
+    if [[ ! -f "$tarball" ]] || [[ ! -s "$tarball" ]]; then
+        log_error "Downloaded file is missing or empty"
+        exit 1
+    fi
+
+    log_info "Extracting source code..."
+
+    if ! tar -xzf "$tarball" -C "$BUILD_DIR" 2>&1; then
+        log_error "Failed to extract tarball"
+        exit 1
+    fi
+
+    # Find the extracted directory
+    SOURCE_DIR=$(find "$BUILD_DIR" -maxdepth 1 -type d -name "fzf-*" | head -1)
+
+    if [[ -z "$SOURCE_DIR" ]] || [[ ! -d "$SOURCE_DIR" ]]; then
+        log_error "Could not find extracted source directory"
+        exit 1
+    fi
+
+    log_info "Source code extracted to: $SOURCE_DIR"
+
+    # Verify it's a valid fzf source
+    if [[ ! -f "$SOURCE_DIR/Cargo.toml" && ! -f "$SOURCE_DIR/go.mod" && ! -f "$SOURCE_DIR/main.go" ]]; then
+        log_error "Downloaded source does not appear to be valid fzf source code"
+        log_error "Expected to find Cargo.toml (Rust) or go.mod/main.go (Go)"
+        exit 1
+    fi
+
+    # Clean up tarball
+    rm -f "$tarball"
 }
 
-# Build fzf from source
+# Detect project language and build
 build_fzf() {
-    log_info "Building fzf from source..."
+    log_info "Detecting project type..."
 
     cd "$SOURCE_DIR"
 
-    # Check if Cargo.toml exists
-    if [[ ! -f "Cargo.toml" ]]; then
-        log_error "Cargo.toml not found. Cannot build."
+    if [[ -f "Cargo.toml" ]]; then
+        log_info "Rust project detected."
+        build_fzf_rust
+    elif [[ -f "go.mod" ]] || [[ -f "main.go" ]]; then
+        log_info "Go project detected."
+        build_fzf_go
+    else
+        log_error "Unknown project type. Cannot determine build method."
         exit 1
     fi
+}
+
+# Build Rust version
+build_fzf_rust() {
+    log_info "Building fzf from Rust source..."
 
     # Ensure we have the right Rust version
     if ! command -v rustc &>/dev/null; then
@@ -189,11 +282,68 @@ build_fzf() {
     log_info "Build successful."
 }
 
+# Build Go version
+build_fzf_go() {
+    log_info "Building fzf from Go source..."
+
+    # Check for Go
+    if ! command -v go &>/dev/null; then
+        log_error "Go compiler not found but Go source detected."
+        log_info "Attempting to install Go..."
+
+        if [[ $EUID -eq 0 ]]; then
+            apt-get update && apt-get install -y golang-go
+        else
+            sudo apt-get update && sudo apt-get install -y golang-go
+        fi
+
+        if ! command -v go &>/dev/null; then
+            log_error "Failed to install Go. Please install manually."
+            exit 1
+        fi
+    fi
+
+    local go_version
+    go_version=$(go version | cut -d' ' -f3)
+    log_info "Using Go version: $go_version"
+
+    log_info "Building release binary..."
+
+    # Build with version info
+    local ldflags="-s -w -X main.version=$FZF_VERSION -X main.revision=source-build"
+
+    if ! go build -ldflags "$ldflags" -o "$SOURCE_DIR/fzf" .; then
+        log_error "Build failed. Please check the error messages above."
+        exit 1
+    fi
+
+    # Verify binary was created
+    if [[ ! -f "$SOURCE_DIR/fzf" ]]; then
+        log_error "Build completed but binary not found at expected location."
+        exit 1
+    fi
+
+    log_info "Build successful."
+}
+
+# Get the path to the built binary
+get_binary_path() {
+    if [[ -f "$SOURCE_DIR/target/release/fzf" ]]; then
+        echo "$SOURCE_DIR/target/release/fzf"
+    elif [[ -f "$SOURCE_DIR/fzf" ]]; then
+        echo "$SOURCE_DIR/fzf"
+    else
+        log_error "Cannot find built binary"
+        exit 1
+    fi
+}
+
 # Install the binary
 install_binary() {
     log_info "Installing fzf binary to $PREFIX/bin..."
 
-    local binary="$SOURCE_DIR/target/release/fzf"
+    local binary
+    binary=$(get_binary_path)
 
     # Check if destination directory exists
     if [[ ! -d "$PREFIX/bin" ]]; then
@@ -237,29 +387,20 @@ install_shell_integration() {
 
     # Install shell scripts if they exist in the source
     local shell_scripts=("completion.bash" "completion.zsh" "key-bindings.bash" "key-bindings.zsh")
-    local found_shell_dir=""
 
-    # Look for shell directory in various locations
     if [[ -d "$SOURCE_DIR/shell" ]]; then
-        found_shell_dir="$SOURCE_DIR/shell"
-    elif [[ -d "$SOURCE_DIR/../shell" ]]; then
-        found_shell_dir="$SOURCE_DIR/../shell"
-    fi
-
-    if [[ -n "$found_shell_dir" ]]; then
         for script in "${shell_scripts[@]}"; do
-            if [[ -f "$found_shell_dir/$script" ]]; then
+            if [[ -f "$SOURCE_DIR/shell/$script" ]]; then
                 if [[ $EUID -eq 0 ]]; then
-                    cp "$found_shell_dir/$script" "$shell_dir/"
+                    cp "$SOURCE_DIR/shell/$script" "$shell_dir/"
                 else
-                    sudo cp "$found_shell_dir/$script" "$shell_dir/"
+                    sudo cp "$SOURCE_DIR/shell/$script" "$shell_dir/"
                 fi
                 log_info "Installed: $script"
             fi
         done
     else
-        log_warn "Shell integration scripts not found in expected locations."
-        log_warn "You may need to manually configure shell integration."
+        log_warn "Shell integration scripts not found in source."
     fi
 
     # Install man page if available
@@ -354,7 +495,7 @@ main() {
     # Run installation steps
     check_ubuntu
     check_dependencies
-    check_source_code
+    fetch_source_code
     build_fzf
     install_binary
     install_shell_integration
@@ -375,7 +516,7 @@ Environment Variables:
   FZF_VERSION             Version to install (default: 0.72.0)
   PREFIX                  Installation prefix (default: /usr/local)
   INSTALL_SHELL_INTEGRATION  Install shell integration files (default: true)
-  SOURCE_DIR              Directory containing fzf source (default: script location)
+  FZF_REPO                GitHub repository URL (default: https://github.com/junegunn/fzf)
 
 Options:
   -h, --help              Show this help message
@@ -392,6 +533,9 @@ Examples:
 
   # Build specific version
   FZF_VERSION=0.71.0 $0
+
+  # Build from a fork
+  FZF_REPO=https://github.com/myfork/fzf $0
 
 EOF
     exit 0
