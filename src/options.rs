@@ -217,7 +217,24 @@ pub fn parse_options(args: &[String]) -> anyhow::Result<Options> {
 
     // Prepend "fzf" to args since clap expects the program name as first arg
     let mut full_args = vec!["fzf".to_string()];
-    full_args.extend_from_slice(args);
+
+    // Convert +x style arguments to --no-x style (fzf uses + for negation)
+    for arg in args {
+        if arg.starts_with('+') && !arg.starts_with("++") {
+            let suffix = &arg[1..];
+            // Map single letter flags to full names
+            let converted = match suffix {
+                "x" => "--no-extended".to_string(),
+                "e" => "--no-exact".to_string(),
+                "i" => "--no-ignore-case".to_string(),
+                "s" => "--no-sort".to_string(),
+                _ => format!("--no-{}", suffix),
+            };
+            full_args.push(converted);
+        } else {
+            full_args.push(arg.clone());
+        }
+    }
 
     let cmd = Command::new("fzf")
         .about("A command-line fuzzy finder")
@@ -233,6 +250,10 @@ pub fn parse_options(args: &[String]) -> anyhow::Result<Options> {
             .short('e')
             .action(ArgAction::SetTrue)
             .help("Enable exact-match"))
+        .arg(Arg::new("no-exact")
+            .long("no-exact")
+            .action(ArgAction::SetTrue)
+            .help("Disable exact-match"))
         .arg(Arg::new("extended")
             .long("extended")
             .short('x')
@@ -476,9 +497,18 @@ pub fn parse_options(args: &[String]) -> anyhow::Result<Options> {
 
     // Parse boolean flags
     opts.filter = matches.get_one::<String>("filter").cloned();
-    opts.exact = matches.get_flag("exact");
+
+    // Exact match: --exact enables, --no-exact (or +e) disables
+    if matches.get_flag("exact") {
+        opts.exact = true;
+        opts.fuzzy = false;
+    } else if matches.get_flag("no-exact") {
+        opts.exact = false;
+        opts.fuzzy = true;
+    }
+    // Otherwise use defaults (fuzzy=true from Options::default())
+
     opts.extended = !matches.get_flag("no-extended");
-    opts.fuzzy = !matches.get_flag("exact");
 
     if matches.get_flag("ignore-case") {
         opts.case_sensitive = Some(false);

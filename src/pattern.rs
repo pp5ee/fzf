@@ -113,6 +113,13 @@ impl Pattern {
                 continue;
             }
 
+            // Handle OR operator: | creates a new term set
+            if term_str == "|" && !term_set.is_empty() {
+                self.term_sets.push(term_set);
+                term_set = Vec::new();
+                continue;
+            }
+
             let (inv, rest) = if term_str.starts_with('!') {
                 (true, &term_str[1..])
             } else {
@@ -161,39 +168,67 @@ impl Pattern {
         let mut first_start = text.len();
         let mut last_end = 0;
 
+        // For OR semantics: if we have multiple term sets (from | operator),
+        // match if ANY set matches, not ALL sets
+        let mut any_set_matched = false;
+        let mut best_score = 0i32;
+        let mut best_first_start = text.len();
+        let mut best_last_end = 0;
+
         for term_set in &self.term_sets {
             let mut set_matched = false;
             let mut set_score = 0i32;
+            let mut set_first_start = text.len();
+            let mut set_last_end = 0;
 
             for term in term_set {
                 if let Some(result) = term.match_text(text) {
                     if !term.inv {
                         set_matched = true;
                         set_score = set_score.max(result.score);
-                        first_start = first_start.min(result.start);
-                        last_end = last_end.max(result.end);
+                        set_first_start = set_first_start.min(result.start);
+                        set_last_end = set_last_end.max(result.end);
                     }
                 } else if term.inv {
                     set_matched = true;
                 }
             }
 
-            if !set_matched {
-                all_matched = false;
-                break;
+            if set_matched {
+                any_set_matched = true;
+                // Keep track of best matching set
+                if set_score > best_score {
+                    best_score = set_score;
+                    best_first_start = set_first_start;
+                    best_last_end = set_last_end;
+                }
             }
-
-            total_score += set_score;
         }
 
-        if all_matched {
-            Some(MatchResult {
-                start: first_start,
-                end: last_end,
-                score: total_score,
-            })
+        // For single term set (no OR), require it to match
+        // For multiple sets with OR, require at least one to match
+        if self.term_sets.len() == 1 {
+            // Original AND behavior for single term set
+            if any_set_matched {
+                Some(MatchResult {
+                    start: best_first_start,
+                    end: best_last_end,
+                    score: best_score,
+                })
+            } else {
+                None
+            }
         } else {
-            None
+            // OR behavior: any set matches
+            if any_set_matched {
+                Some(MatchResult {
+                    start: best_first_start,
+                    end: best_last_end,
+                    score: best_score,
+                })
+            } else {
+                None
+            }
         }
     }
 
