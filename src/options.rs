@@ -327,8 +327,6 @@ pub fn parse_options(args: &[String]) -> anyhow::Result<Options> {
         .arg(Arg::new("border")
             .long("border")
             .value_name("STYLE")
-            .num_args(0..=1)
-            .default_missing_value("rounded")
             .action(ArgAction::Set)
             .help("Draw border around the finder"))
         .arg(Arg::new("prompt")
