@@ -1,5 +1,5 @@
 use crate::item::Item;
-use crate::options::{BorderStyle, Options};
+use crate::options::{BorderStyle, Layout, Options};
 use crate::pattern::{Pattern, PatternOptions};
 use crate::reader::Reader;
 use crate::result::Result as FzfResult;
@@ -10,13 +10,15 @@ use anyhow::Result;
 use crossterm::{
     event::{self, DisableMouseCapture, EnableMouseCapture, Event as CrosstermEvent, KeyCode, KeyEventKind, KeyModifiers},
     execute,
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen, Clear, ClearType},
+    cursor::{Show, Hide},
 };
 use ratatui::{
     backend::{Backend, CrosstermBackend},
-    layout::{Alignment, Constraint, Direction, Layout as RatatuiLayout, Rect},
+    layout::{Alignment, Constraint, Direction, Layout as RatatuiLayout, Margin, Rect, Position},
     style::{Color, Modifier, Style},
-    widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap},
+    widgets::{Block, Borders, Clear as ClearWidget, List, ListItem, ListState, Paragraph, Wrap, BorderType},
+    text::{Line, Span, Text},
     Frame, Terminal as RatatuiTerminal,
 };
 use std::io::{self, Write};
@@ -44,6 +46,27 @@ pub struct Terminal {
     preview_output: String,
     preview_scroll: usize,
     use_parallel: bool,
+    height_mode: HeightMode,
+    terminal_size: (u16, u16),
+    scroll_offset: usize,
+    info_style: InfoStyle,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HeightMode {
+    Fullscreen,
+    Fixed(u16),
+    Percentage(u16),
+    Auto(u16),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InfoStyle {
+    Default,
+    Right,
+    Hidden,
+    Inline,
+    InlineRight,
 }
 
 impl Terminal {
@@ -60,10 +83,27 @@ impl Terminal {
 
         let preview_visible = options.preview.is_some();
 
+        let height_mode = if let Some(ref height_str) = options.height {
+            Self::parse_height(height_str)
+        } else {
+            HeightMode::Fullscreen
+        };
+
+        let info_style = match options.info {
+            crate::options::InfoStyle::Default => InfoStyle::Default,
+            crate::options::InfoStyle::Right => InfoStyle::Right,
+            crate::options::InfoStyle::Hidden => InfoStyle::Hidden,
+            crate::options::InfoStyle::Inline => InfoStyle::Inline,
+            crate::options::InfoStyle::InlineRight => InfoStyle::InlineRight,
+        };
+
+        let query = options.query.clone().unwrap_or_default();
+        let cursor_pos = options.query.as_ref().map(|q| q.len()).unwrap_or(0);
+
         Self {
             options,
-            query: String::new(),
-            cursor_pos: 0,
+            query,
+            cursor_pos,
             items: Vec::new(),
             filtered_items: Vec::new(),
             selection: ListState::default(),
@@ -78,16 +118,51 @@ impl Terminal {
             preview_output: String::new(),
             preview_scroll: 0,
             use_parallel: true,
+            height_mode,
+            terminal_size: (0, 0),
+            scroll_offset: 0,
+            info_style,
+        }
+    }
+
+    fn parse_height(height_str: &str) -> HeightMode {
+        let trimmed = height_str.trim();
+
+        if trimmed.starts_with('~') {
+            let num = trimmed[1..].trim_end_matches('%').parse::<u16>().unwrap_or(50);
+            HeightMode::Auto(num)
+        } else if trimmed.ends_with('%') {
+            let num = trimmed[..trimmed.len()-1].parse::<u16>().unwrap_or(50);
+            HeightMode::Percentage(num)
+        } else if let Ok(num) = trimmed.parse::<u16>() {
+            if trimmed.starts_with('-') {
+                HeightMode::Auto(num)
+            } else {
+                HeightMode::Fixed(num)
+            }
+        } else {
+            HeightMode::Fullscreen
         }
     }
 
     pub fn run(&mut self) -> Result<i32> {
         enable_raw_mode()?;
         let mut stdout = io::stdout();
-        execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
+        execute!(stdout, Hide)?;
+
+        let use_alternate = self.height_mode == HeightMode::Fullscreen;
+
+        if use_alternate {
+            execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
+        } else {
+            execute!(stdout, Clear(ClearType::All))?;
+        }
 
         let backend = CrosstermBackend::new(stdout);
         let mut terminal = RatatuiTerminal::new(backend)?;
+
+        let size = terminal.size()?;
+        self.terminal_size = (size.width, size.height);
 
         let reader = self.reader.take().unwrap();
         std::thread::spawn(move || {
@@ -96,14 +171,25 @@ impl Terminal {
 
         self.load_items();
 
+        if !self.query.is_empty() {
+            self.perform_parallel_search();
+        }
+
         let result = self.run_event_loop(&mut terminal);
 
         disable_raw_mode()?;
         execute!(
             terminal.backend_mut(),
-            LeaveAlternateScreen,
-            DisableMouseCapture
+            Show
         )?;
+
+        if use_alternate {
+            execute!(
+                terminal.backend_mut(),
+                LeaveAlternateScreen,
+                DisableMouseCapture
+            )?;
+        }
 
         if result.is_ok() {
             self.output_selections()?;
@@ -125,10 +211,19 @@ impl Terminal {
 
             if crossterm::event::poll(timeout)? {
                 if let Ok(event) = event::read() {
-                    if let CrosstermEvent::Key(key) = event {
-                        if key.kind == KeyEventKind::Press {
-                            self.handle_key_event(key.code, key.modifiers)?;
+                    match event {
+                        CrosstermEvent::Key(key) => {
+                            if key.kind == KeyEventKind::Press {
+                                self.handle_key_event(key.code, key.modifiers)?;
+                            }
                         }
+                        CrosstermEvent::Resize(_cols, _rows) => {
+                            // Handle terminal resize
+                            if let Ok(size) = terminal.size() {
+                                self.terminal_size = (size.width, size.height);
+                            }
+                        }
+                        _ => {}
                     }
                 }
             }
@@ -225,8 +320,6 @@ impl Terminal {
     }
 
     fn perform_parallel_matching(&self, pattern: Arc<Pattern>) -> Vec<FzfResult> {
-        use rayon::prelude::*;
-
         let items: Vec<_> = self.items.iter().map(|i| Arc::clone(i)).collect();
 
         let mut results: Vec<FzfResult> = items
@@ -333,6 +426,31 @@ impl Terminal {
                         'w' => self.delete_word(),
                         'a' => self.cursor_pos = 0,
                         'e' => self.cursor_pos = self.query.len(),
+                        'n' => self.move_cursor(1),
+                        'p' => self.move_cursor(-1),
+                        'f' => self.move_cursor(1),
+                        'b' => self.move_cursor(-1),
+                        'd' => {
+                            if self.cursor_pos < self.query.len() {
+                                self.query.remove(self.cursor_pos);
+                            }
+                        }
+                        'k' => {
+                            self.query.truncate(self.cursor_pos);
+                        }
+                        'g' => self.running.store(false, Ordering::Relaxed),
+                        'j' => self.move_selection(1),
+                        'h' => self.move_selection(-1),
+                        'l' => self.move_selection(1),
+                        'm' => self.accept_selection()?,
+                        '/' => self.toggle_preview(),
+                        _ => {}
+                    }
+                } else if modifiers.contains(KeyModifiers::ALT) {
+                    match c {
+                        'b' => self.move_word(-1),
+                        'f' => self.move_word(1),
+                        'd' => self.delete_word_forward(),
                         _ => {}
                     }
                 } else {
@@ -348,46 +466,92 @@ impl Terminal {
                     self.last_search = Instant::now() - self.search_debounce;
                 }
             }
+            KeyCode::Delete => {
+                if self.cursor_pos < self.query.len() {
+                    self.query.remove(self.cursor_pos);
+                    self.last_search = Instant::now() - self.search_debounce;
+                }
+            }
             KeyCode::Left => {
-                if self.cursor_pos > 0 {
-                    self.cursor_pos -= 1;
+                if modifiers.contains(KeyModifiers::CONTROL) {
+                    self.move_word(-1);
+                } else {
+                    self.move_cursor(-1);
                 }
             }
             KeyCode::Right => {
-                if self.cursor_pos < self.query.len() {
-                    self.cursor_pos += 1;
+                if modifiers.contains(KeyModifiers::CONTROL) {
+                    self.move_word(1);
+                } else {
+                    self.move_cursor(1);
                 }
             }
             KeyCode::Up => {
-                if let Some(selected) = self.selection.selected() {
-                    if selected > 0 {
-                        self.selection.select(Some(selected - 1));
-                    }
-                } else if !self.filtered_items.is_empty() {
-                    self.selection.select(Some(self.filtered_items.len() - 1));
+                if modifiers.contains(KeyModifiers::CONTROL) {
+                    self.scroll_preview(-1);
+                } else {
+                    self.move_selection(-1);
                 }
             }
             KeyCode::Down => {
-                if let Some(selected) = self.selection.selected() {
-                    if selected < self.filtered_items.len().saturating_sub(1) {
-                        self.selection.select(Some(selected + 1));
-                    }
-                } else if !self.filtered_items.is_empty() {
-                    self.selection.select(Some(0));
+                if modifiers.contains(KeyModifiers::CONTROL) {
+                    self.scroll_preview(1);
+                } else {
+                    self.move_selection(1);
                 }
             }
             KeyCode::Home => self.cursor_pos = 0,
             KeyCode::End => self.cursor_pos = self.query.len(),
+            KeyCode::PageUp => self.move_selection(-10),
+            KeyCode::PageDown => self.move_selection(10),
             KeyCode::Enter => self.accept_selection()?,
             KeyCode::Tab => {
-                if self.options.multi.is_some() {
-                    self.toggle_selection();
+                if modifiers.contains(KeyModifiers::SHIFT) {
+                    self.move_selection(-1);
+                } else {
+                    if self.options.multi.is_some() {
+                        self.toggle_selection();
+                    } else {
+                        self.move_selection(1);
+                    }
                 }
             }
             KeyCode::Esc => self.running.store(false, Ordering::Relaxed),
+            KeyCode::F(n) => {
+                if n == 1 {
+                    self.running.store(false, Ordering::Relaxed);
+                }
+            }
             _ => {}
         }
         Ok(())
+    }
+
+    fn move_cursor(&mut self, delta: i32) {
+        let new_pos = self.cursor_pos as i32 + delta;
+        self.cursor_pos = new_pos.clamp(0, self.query.len() as i32) as usize;
+    }
+
+    fn move_word(&mut self, direction: i32) {
+        if direction > 0 {
+            while self.cursor_pos < self.query.len() &&
+                  self.query.chars().nth(self.cursor_pos).map_or(false, |c| c.is_alphanumeric()) {
+                self.cursor_pos += 1;
+            }
+            while self.cursor_pos < self.query.len() &&
+                  self.query.chars().nth(self.cursor_pos).map_or(false, |c| !c.is_alphanumeric()) {
+                self.cursor_pos += 1;
+            }
+        } else {
+            while self.cursor_pos > 0 &&
+                  self.query.chars().nth(self.cursor_pos - 1).map_or(false, |c| !c.is_alphanumeric()) {
+                self.cursor_pos -= 1;
+            }
+            while self.cursor_pos > 0 &&
+                  self.query.chars().nth(self.cursor_pos - 1).map_or(false, |c| c.is_alphanumeric()) {
+                self.cursor_pos -= 1;
+            }
+        }
     }
 
     fn delete_word(&mut self) {
@@ -403,6 +567,39 @@ impl Terminal {
         }
         self.query.drain(pos..self.cursor_pos);
         self.cursor_pos = pos;
+    }
+
+    fn delete_word_forward(&mut self) {
+        let old_pos = self.cursor_pos;
+        self.move_word(1);
+        self.query.drain(old_pos..self.cursor_pos);
+        self.cursor_pos = old_pos;
+    }
+
+    fn move_selection(&mut self, delta: i32) {
+        let current = self.selection.selected().unwrap_or(0);
+        let new_pos = current as i32 + delta;
+        let max = self.filtered_items.len().saturating_sub(1) as i32;
+
+        if self.options.cycle {
+            let wrapped = ((new_pos % (max + 1)) + (max + 1)) % (max + 1);
+            self.selection.select(Some(wrapped as usize));
+        } else {
+            self.selection.select(Some(new_pos.clamp(0, max) as usize));
+        }
+    }
+
+    fn scroll_preview(&mut self, delta: i32) {
+        if self.preview_visible {
+            let new_scroll = self.preview_scroll as i32 + delta;
+            self.preview_scroll = new_scroll.max(0) as usize;
+        }
+    }
+
+    fn toggle_preview(&mut self) {
+        if self.options.preview.is_some() {
+            self.preview_visible = !self.preview_visible;
+        }
     }
 
     fn toggle_selection(&mut self) {
@@ -454,21 +651,57 @@ impl Terminal {
     }
 
     fn draw(&mut self, frame: &mut Frame) {
-        if self.preview_visible {
+        let area = frame.area();
+
+        let main_area = match self.height_mode {
+            HeightMode::Fullscreen => area,
+            HeightMode::Fixed(height) => {
+                let y = area.height.saturating_sub(height) / 2;
+                Rect::new(0, y, area.width, height.min(area.height))
+            }
+            HeightMode::Percentage(pct) => {
+                let height = (area.height as u16 * pct / 100).max(10);
+                let y = area.height.saturating_sub(height) / 2;
+                Rect::new(0, y, area.width, height.min(area.height))
+            }
+            HeightMode::Auto(max_pct) => {
+                let content_height = self.filtered_items.len().min(20) as u16 + 4;
+                let max_height = (area.height as u16 * max_pct / 100).max(10);
+                let height = content_height.min(max_height).min(area.height);
+                let y = area.height.saturating_sub(height) / 2;
+                Rect::new(0, y, area.width, height)
+            }
+        };
+
+        if self.preview_visible && self.options.preview.is_some() {
             let chunks = RatatuiLayout::default()
                 .direction(Direction::Horizontal)
                 .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
-                .split(frame.area());
+                .split(main_area);
 
             self.draw_main_panel(frame, chunks[0]);
             self.draw_preview_panel(frame, chunks[1]);
         } else {
-            self.draw_main_panel(frame, frame.area());
+            self.draw_main_panel(frame, main_area);
         }
     }
 
     fn draw_main_panel(&mut self, frame: &mut Frame, area: Rect) {
-        let chunks = self.layout_chunks(area);
+        let border_type = self.get_border_type();
+        let has_border = border_type != Borders::NONE;
+
+        let inner_area = if has_border {
+            let block = Block::default()
+                .borders(border_type)
+                .border_type(self.get_border_style())
+                .border_style(Style::default().fg(Color::Gray));
+            frame.render_widget(block, area);
+            area.inner(Margin::new(1, 1))
+        } else {
+            area
+        };
+
+        let chunks = self.layout_chunks(inner_area);
 
         if let Some(header) = &self.options.header {
             self.draw_header(frame, chunks.header, header);
@@ -481,13 +714,40 @@ impl Terminal {
             self.draw_footer(frame, chunks.footer, footer);
         }
 
-        self.draw_info(frame, chunks.info);
+        if self.info_style != InfoStyle::Hidden {
+            self.draw_info(frame, chunks.info);
+        }
+    }
+
+    fn get_border_type(&self) -> Borders {
+        match self.options.border {
+            BorderStyle::None => Borders::NONE,
+            BorderStyle::Rounded | BorderStyle::Sharp | BorderStyle::Bold |
+            BorderStyle::Block | BorderStyle::ThinBlock | BorderStyle::Double => Borders::ALL,
+            BorderStyle::Horizontal => Borders::TOP | Borders::BOTTOM,
+            BorderStyle::Vertical => Borders::LEFT | Borders::RIGHT,
+            BorderStyle::Top => Borders::TOP,
+            BorderStyle::Bottom => Borders::BOTTOM,
+            BorderStyle::Left => Borders::LEFT,
+            BorderStyle::Right => Borders::RIGHT,
+        }
+    }
+
+    fn get_border_style(&self) -> BorderType {
+        match self.options.border {
+            BorderStyle::Rounded => BorderType::Rounded,
+            BorderStyle::Sharp | BorderStyle::Block | BorderStyle::ThinBlock => BorderType::Plain,
+            BorderStyle::Double => BorderType::Double,
+            BorderStyle::Bold => BorderType::Thick,
+            _ => BorderType::Plain,
+        }
     }
 
     fn draw_preview_panel(&self, frame: &mut Frame, area: Rect) {
         let block = Block::default()
             .title("Preview")
             .borders(Borders::ALL)
+            .border_type(self.get_border_style())
             .border_style(Style::default().fg(Color::Gray));
 
         let preview_text = if self.preview_output.is_empty() {
@@ -496,7 +756,10 @@ impl Terminal {
             &self.preview_output
         };
 
-        let paragraph = Paragraph::new(preview_text.to_string())
+        let lines: Vec<&str> = preview_text.lines().skip(self.preview_scroll).collect();
+        let display_text = lines.join("\n");
+
+        let paragraph = Paragraph::new(display_text)
             .block(block)
             .wrap(Wrap { trim: true });
 
@@ -507,17 +770,39 @@ impl Terminal {
         let has_header = self.options.header.is_some();
         let has_footer = self.options.footer.is_some();
 
-        let main_constraints = [
-            if has_header { Constraint::Length(1) } else { Constraint::Length(0) },
-            Constraint::Length(1),
-            Constraint::Min(1),
-            Constraint::Length(1),
-            if has_footer { Constraint::Length(1) } else { Constraint::Length(0) },
-        ];
+        let constraints = match self.options.layout {
+            Layout::Reverse => {
+                vec![
+                    if has_footer { Constraint::Length(1) } else { Constraint::Length(0) },
+                    Constraint::Length(1),
+                    Constraint::Min(1),
+                    Constraint::Length(1),
+                    if has_header { Constraint::Length(1) } else { Constraint::Length(0) },
+                ]
+            }
+            Layout::ReverseList => {
+                vec![
+                    if has_header { Constraint::Length(1) } else { Constraint::Length(0) },
+                    Constraint::Length(1),
+                    Constraint::Min(1),
+                    Constraint::Length(1),
+                    if has_footer { Constraint::Length(1) } else { Constraint::Length(0) },
+                ]
+            }
+            _ => {
+                vec![
+                    if has_header { Constraint::Length(1) } else { Constraint::Length(0) },
+                    Constraint::Length(1),
+                    Constraint::Min(1),
+                    Constraint::Length(1),
+                    if has_footer { Constraint::Length(1) } else { Constraint::Length(0) },
+                ]
+            }
+        };
 
         let main_chunks = RatatuiLayout::default()
             .direction(Direction::Vertical)
-            .constraints(main_constraints)
+            .constraints(constraints)
             .split(area);
 
         LayoutChunks {
@@ -557,17 +842,32 @@ impl Terminal {
     }
 
     fn draw_list(&mut self, frame: &mut Frame, area: Rect) {
-        let items: Vec<ListItem> = self.filtered_items
+        let visible_count = area.height as usize;
+        let selected = self.selection.selected().unwrap_or(0);
+
+        let start = if selected >= self.scroll_offset + visible_count {
+            selected.saturating_sub(visible_count / 2)
+        } else if selected < self.scroll_offset {
+            selected.saturating_sub(visible_count / 2)
+        } else {
+            self.scroll_offset
+        };
+
+        let end = (start + visible_count).min(self.filtered_items.len());
+        self.scroll_offset = start;
+
+        let items: Vec<ListItem> = self.filtered_items[start..end]
             .iter()
             .enumerate()
             .map(|(idx, result)| {
+                let actual_idx = start + idx;
                 let item = &result.item;
                 let text = item.as_string(self.options.ansi);
                 let is_selected = self.multi_selection.iter().any(|i| i.index() == item.index());
                 let marker = if is_selected { &self.options.marker } else { "  " };
                 let display_text = format!("{}{}", marker, text);
 
-                let style = if Some(idx) == self.selection.selected() {
+                let style = if Some(actual_idx) == self.selection.selected() {
                     Style::default()
                         .bg(Color::Blue)
                         .fg(Color::White)
@@ -605,9 +905,14 @@ impl Terminal {
             self.filtered_items.len()
         );
 
+        let alignment = match self.info_style {
+            InfoStyle::Right | InfoStyle::InlineRight => Alignment::Right,
+            _ => Alignment::Left,
+        };
+
         let paragraph = Paragraph::new(info)
             .style(Style::default().fg(Color::Gray))
-            .alignment(Alignment::Right);
+            .alignment(alignment);
 
         frame.render_widget(paragraph, area);
     }
