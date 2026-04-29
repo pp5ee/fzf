@@ -345,22 +345,27 @@ install_binary() {
     local binary
     binary=$(get_binary_path)
 
-    # Check if destination directory exists
+    # Create destination directory (idempotent - mkdir -p succeeds if exists)
     if [[ ! -d "$PREFIX/bin" ]]; then
         log_info "Creating directory: $PREFIX/bin"
-        if [[ $EUID -eq 0 ]]; then
-            mkdir -p "$PREFIX/bin"
-        else
-            sudo mkdir -p "$PREFIX/bin"
-        fi
+    fi
+    if [[ $EUID -eq 0 ]]; then
+        mkdir -p "$PREFIX/bin"
+    else
+        sudo mkdir -p "$PREFIX/bin"
     fi
 
-    # Install binary
+    # Check if binary already exists
+    if [[ -f "$PREFIX/bin/fzf" ]]; then
+        log_info "Existing fzf binary found, updating..."
+    fi
+
+    # Install binary (cp overwrites existing)
     if [[ $EUID -eq 0 ]]; then
-        cp "$binary" "$PREFIX/bin/fzf"
+        cp -f "$binary" "$PREFIX/bin/fzf"
         chmod 755 "$PREFIX/bin/fzf"
     else
-        sudo cp "$binary" "$PREFIX/bin/fzf"
+        sudo cp -f "$binary" "$PREFIX/bin/fzf"
         sudo chmod 755 "$PREFIX/bin/fzf"
     fi
 
